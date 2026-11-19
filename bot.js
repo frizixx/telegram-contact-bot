@@ -111,12 +111,36 @@ bot.command('start', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
   } else {
-    await ctx.reply(
-      'Hi!\n' +
-      'Это контактный бот для связи с Frizix.\n\n' +
-      '✉️ Напишите ваше сообщение, и оно будет передано.\n' +
-      '⏱️ Среднее время ответа: от нескольких часов до 1 рабочего дня.'
-    );
+    // Отправляем GIF с приветствием
+    try {
+      const gifPath = process.env.FLY_APP_NAME ? '/app/greeting.gif' : join(__dirname, 'greeting.gif');
+
+      if (existsSync(gifPath)) {
+        await ctx.replyWithAnimation(gifPath, {
+          caption: 'Hi!\n' +
+                   'Это контактный бот для связи с Frizix.\n\n' +
+                   '✉️ Напишите ваше сообщение, и оно будет передано.\n' +
+                   '⏱️ Среднее время ответа: от нескольких часов до 1 рабочего дня.'
+        });
+      } else {
+        // Если GIF не найден, отправляем текст
+        await ctx.reply(
+          'Hi!\n' +
+          'Это контактный бот для связи с Frizix.\n\n' +
+          '✉️ Напишите ваше сообщение, и оно будет передано.\n' +
+          '⏱️ Среднее время ответа: от нескольких часов до 1 рабочего дня.'
+        );
+      }
+    } catch (error) {
+      log('error', 'Failed to send greeting GIF', { error: error.message });
+      // Fallback на текст
+      await ctx.reply(
+        'Hi!\n' +
+        'Это контактный бот для связи с Frizix.\n\n' +
+        '✉️ Напишите ваше сообщение, и оно будет передано.\n' +
+        '⏱️ Среднее время ответа: от нескольких часов до 1 рабочего дня.'
+      );
+    }
   }
   log('info', 'User started bot', { userId: ctx.from.id, username: ctx.from.username });
 });

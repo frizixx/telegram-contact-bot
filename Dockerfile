@@ -10,6 +10,7 @@ RUN npm ci --only=production
 
 # Copy app files
 COPY bot.js ./
+COPY greeting.gif ./
 
 # Run as non-root user
 USER node

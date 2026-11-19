@@ -21,10 +21,12 @@ let db = {
   blocklist: [],
   rateLimit: {},
   quickReplies: [
-    { id: 1, label: '👋 Привет', text: 'Привет! Спасибо за сообщение, отвечу в ближайшее время.' },
+    { id: 1, label: '👋 Привет', text: 'Здравствуйте! Спасибо за обращение. Отвечу в ближайшее время.' },
     { id: 2, label: '⏰ Занят', text: 'Сейчас занят, отвечу позже. Спасибо за понимание!' },
-    { id: 3, label: '✅ Принято', text: 'Сообщение принято, обработаю в течение дня.' }
-  ]
+    { id: 3, label: '✅ Принято', text: 'Ваше сообщение принято. Обработаю в течение дня.' }
+  ],
+  autoReplySent: {}, // Кому уже отправлен автоответ
+  ownerLastActivity: Date.now() // Последняя активность владельца
 };
 
 // Загрузка БД
@@ -91,8 +93,11 @@ bot.command('start', async (ctx) => {
       '/stats — Статистика бота\n' +
       '/block <user_id> — Заблокировать пользователя\n' +
       '/unblock <user_id> — Разблокировать\n' +
-      '/quickreplies — Управление быстрыми ответами\n\n' +
-      '💬 Чтобы ответить пользователю — используй Reply на его сообщение',
+      '/quickreplies — Управление быстрыми ответами\n' +
+      '/online — Отметиться как онлайн (отключит автоответчик)\n' +
+      '/offline — Включить автоответчик\n\n' +
+      '💬 Чтобы ответить пользователю — используй Reply на его сообщение\n\n' +
+      '🤖 Автоответчик: если ты не активен >5 минут, пользователи автоматически получат сообщение "Сейчас занят, отвечу позже"',
       { parse_mode: 'Markdown' }
     );
   } else {
@@ -212,18 +217,50 @@ bot.command('quickreplies', async (ctx) => {
   await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
+// Команда /online (только для владельца)
+bot.command('online', async (ctx) => {
+  if (ctx.from.id !== OWNER_ID) return;
+
+  db.ownerLastActivity = Date.now();
+  saveDB();
+
+  await ctx.reply('✅ Вы отмечены как онлайн. Автоответчик не будет срабатывать.');
+  log('info', 'Owner marked as online');
+});
+
+// Команда /offline (только для владельца)
+bot.command('offline', async (ctx) => {
+  if (ctx.from.id !== OWNER_ID) return;
+
+  // Устанавливаем время последней активности в прошлое (>5 минут назад)
+  db.ownerLastActivity = Date.now() - (10 * 60 * 1000);
+  saveDB();
+
+  await ctx.reply('⏰ Автоответчик включён. Пользователи будут получать автоматическое сообщение: "Сейчас занят, отвечу позже. Спасибо за понимание!"');
+  log('info', 'Owner marked as offline, auto-reply enabled');
+});
+
 // Обработка всех входящих сообщений
 bot.on('message', async (ctx) => {
   const userId = ctx.from.id;
 
   // Если пишет владелец - это ответ на чьё-то сообщение
   if (userId === OWNER_ID) {
+    // Обновляем время последней активности владельца
+    db.ownerLastActivity = Date.now();
+
     if (ctx.message.reply_to_message) {
       const originalText = ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption || '';
       const userIdMatch = originalText.match(/👤 User ID: (\d+)/);
 
       if (userIdMatch) {
         const targetUserId = parseInt(userIdMatch[1]);
+
+        // Сбрасываем автоответ для этого пользователя, раз владелец ответил
+        if (db.autoReplySent[targetUserId]) {
+          delete db.autoReplySent[targetUserId];
+          saveDB();
+        }
 
         try {
           const replyText = ctx.message.text || ctx.message.caption || '[медиа]';
@@ -232,18 +269,18 @@ bot.on('message', async (ctx) => {
           if (ctx.message.photo) {
             const photo = ctx.message.photo[ctx.message.photo.length - 1];
             await bot.api.sendPhoto(targetUserId, photo.file_id, {
-              caption: `💬 Ответ от владельца:\n\n${ctx.message.caption || ''}`
+              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
             });
           } else if (ctx.message.video) {
             await bot.api.sendVideo(targetUserId, ctx.message.video.file_id, {
-              caption: `💬 Ответ от владельца:\n\n${ctx.message.caption || ''}`
+              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
             });
           } else if (ctx.message.document) {
             await bot.api.sendDocument(targetUserId, ctx.message.document.file_id, {
-              caption: `💬 Ответ от владельца:\n\n${ctx.message.caption || ''}`
+              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
             });
           } else {
-            await bot.api.sendMessage(targetUserId, `💬 Ответ от владельца:\n\n${replyText}`);
+            await bot.api.sendMessage(targetUserId, `💬 Ответ:\n\n${replyText}`);
           }
 
           // Кнопки быстрых ответов
@@ -355,6 +392,24 @@ bot.on('message', async (ctx) => {
       '✓ Ваше сообщение отправлено.\n\n' +
       'Вы получите ответ в ближайшее время.'
     );
+
+    // Автоответчик: если владелец не в сети (не активен > 5 минут)
+    const offlineThreshold = 5 * 60 * 1000; // 5 минут
+    const timeSinceLastActivity = Date.now() - db.ownerLastActivity;
+
+    if (timeSinceLastActivity > offlineThreshold && !db.autoReplySent[userId]) {
+      // Отправляем автоответ только один раз этому пользователю
+      setTimeout(async () => {
+        try {
+          await bot.api.sendMessage(userId, '⏰ Сейчас занят, отвечу позже. Спасибо за понимание!');
+          db.autoReplySent[userId] = Date.now();
+          saveDB();
+          log('info', 'Auto-reply sent', { userId });
+        } catch (error) {
+          log('error', 'Failed to send auto-reply', { error: error.message });
+        }
+      }, 3000); // Задержка 3 секунды после подтверждения
+    }
 
     log('success', 'Message forwarded to owner', { userId, messageType });
 

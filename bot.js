@@ -12,8 +12,8 @@ const __dirname = dirname(__filename);
 const bot = new Bot(process.env.BOT_TOKEN);
 const OWNER_ID = parseInt(process.env.OWNER_ID);
 
-// JSON база данных
-const DB_FILE = join(__dirname, 'bot-data.json');
+// JSON база данных - используем /tmp для временного хранилища на Fly.io
+const DB_FILE = process.env.FLY_APP_NAME ? '/tmp/bot-data.json' : join(__dirname, 'bot-data.json');
 
 // Инициализация БД
 let db = {
@@ -31,15 +31,25 @@ let db = {
 
 // Загрузка БД
 function loadDB() {
-  if (existsSync(DB_FILE)) {
-    const data = readFileSync(DB_FILE, 'utf8');
-    db = JSON.parse(data);
+  try {
+    if (existsSync(DB_FILE)) {
+      const data = readFileSync(DB_FILE, 'utf8');
+      db = JSON.parse(data);
+      log('info', 'Database loaded successfully');
+    }
+  } catch (error) {
+    log('warning', 'Could not load database, using defaults', { error: error.message });
   }
 }
 
 // Сохранение БД
 function saveDB() {
-  writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
+  try {
+    writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
+  } catch (error) {
+    log('error', 'Failed to save database', { error: error.message });
+    // Не падаем, просто логируем ошибку
+  }
 }
 
 // Загружаем при старте

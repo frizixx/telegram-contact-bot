@@ -1,14 +1,14 @@
 {
   "name": "telegram-contact-bot",
-  "version": "1.0.0",
-  "description": "Contact bot without ads - forwards messages to owner with user info",
+  "version": "2.0.0",
+  "description": "Advanced contact bot with stats, anti-spam, media support, quick replies, and blocklist",
   "main": "bot.js",
   "type": "module",
   "scripts": {
     "start": "node bot.js",
     "dev": "node --watch bot.js"
   },
-  "keywords": ["telegram", "bot", "contact"],
+  "keywords": ["telegram", "bot", "contact", "stats", "anti-spam"],
   "author": "markw",
   "license": "MIT",
   "dependencies": {

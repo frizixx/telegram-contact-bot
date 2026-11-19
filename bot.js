@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { config } from 'dotenv';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -116,7 +116,7 @@ bot.command('start', async (ctx) => {
       const gifPath = process.env.FLY_APP_NAME ? '/app/greeting.gif' : join(__dirname, 'greeting.gif');
 
       if (existsSync(gifPath)) {
-        await ctx.replyWithAnimation(gifPath, {
+        await ctx.replyWithAnimation(new InputFile(gifPath), {
           caption: 'Hi!\n' +
                    'Это контактный бот для связи с Frizix.\n\n' +
                    '✉️ Напишите ваше сообщение, и оно будет передано.\n' +

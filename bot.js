@@ -12,8 +12,8 @@ const __dirname = dirname(__filename);
 const bot = new Bot(process.env.BOT_TOKEN);
 const OWNER_ID = parseInt(process.env.OWNER_ID);
 
-// JSON база данных - используем /tmp для временного хранилища на Fly.io
-const DB_FILE = process.env.FLY_APP_NAME ? '/tmp/bot-data.json' : join(__dirname, 'bot-data.json');
+// JSON база данных - используем /tmp везде на серверах
+const DB_FILE = process.env.DB_PATH || (process.env.FLY_APP_NAME ? '/tmp/bot-data.json' : process.env.RAILWAY_ENVIRONMENT ? '/tmp/bot-data.json' : join(__dirname, 'bot-data.json'));
 
 // Инициализация БД
 let db = {
@@ -111,10 +111,17 @@ bot.command('start', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
   } else {
-    // Отправляем GIF с приветствием
+    // Отправляем логотип и GIF с приветствием
     try {
+      const logoPath = process.env.FLY_APP_NAME ? '/app/bot-logo.png' : join(__dirname, 'bot-logo.png');
       const gifPath = process.env.FLY_APP_NAME ? '/app/greeting.gif' : join(__dirname, 'greeting.gif');
 
+      // Отправляем логотип
+      if (existsSync(logoPath)) {
+        await ctx.replyWithPhoto(new InputFile(logoPath));
+      }
+
+      // Отправляем GIF с текстом
       if (existsSync(gifPath)) {
         await ctx.replyWithAnimation(new InputFile(gifPath), {
           caption: 'Hi!\n' +
@@ -123,7 +130,7 @@ bot.command('start', async (ctx) => {
                    '⏱️ Среднее время ответа: от нескольких часов до 1 рабочего дня.'
         });
       } else {
-        // Если GIF не найден, отправляем текст
+        // Если GIF не найден, отправляем только текст
         await ctx.reply(
           'Hi!\n' +
           'Это контактный бот для связи с Frizix.\n\n' +
@@ -132,7 +139,7 @@ bot.command('start', async (ctx) => {
         );
       }
     } catch (error) {
-      log('error', 'Failed to send greeting GIF', { error: error.message });
+      log('error', 'Failed to send greeting media', { error: error.message });
       // Fallback на текст
       await ctx.reply(
         'Hi!\n' +

@@ -1,0 +1,19 @@
+{
+  "install": "npm install",
+  "start": "node bot.js",
+  "watch": {
+    "ignore": [
+      "\.git"
+    ],
+    "install": {
+      "include": [
+        "^package\.json$"
+      ]
+    },
+    "restart": {
+      "include": [
+        "\.js$"
+      ]
+    }
+  }
+}

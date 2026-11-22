@@ -1,0 +1,63 @@
+<!-- Реалистичный 6: Ночной город (Cyberpunk) -->
+<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="city-sky" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0e27;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="neon-pink" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ff006e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ff66a3;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="neon-cyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00f5ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00d9ff;stop-opacity:1" />
+    </linearGradient>
+    <filter id="neon-strong">
+      <feGaussianBlur stdDeviation="5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Небо ночного города -->
+  <rect width="1024" height="1024" fill="url(#city-sky)"/>
+
+  <!-- Силуэты зданий -->
+  <rect x="0" y="700" width="150" height="324" fill="#0a0a1a" opacity="0.9"/>
+  <rect x="150" y="650" width="180" height="374" fill="#0d0d1f" opacity="0.85"/>
+  <rect x="330" y="720" width="140" height="304" fill="#0a0a1a" opacity="0.9"/>
+  <rect x="550" y="680" width="160" height="344" fill="#0d0d1f" opacity="0.85"/>
+  <rect x="710" y="640" width="170" height="384" fill="#0a0a1a" opacity="0.9"/>
+  <rect x="880" y="700" width="144" height="324" fill="#0d0d1f" opacity="0.85"/>
+
+  <!-- Окна в зданиях -->
+  <rect x="20" y="720" width="15" height="20" fill="#ff006e" opacity="0.6"/>
+  <rect x="50" y="750" width="15" height="20" fill="#00f5ff" opacity="0.5"/>
+  <rect x="180" y="670" width="15" height="20" fill="#00f5ff" opacity="0.6"/>
+  <rect x="220" y="700" width="15" height="20" fill="#ff006e" opacity="0.5"/>
+  <rect x="600" y="710" width="15" height="20" fill="#ff006e" opacity="0.6"/>
+  <rect x="750" y="670" width="15" height="20" fill="#00f5ff" opacity="0.5"/>
+
+  <!-- Неоновая рамка -->
+  <rect x="262" y="280" width="500" height="280" rx="4" fill="none" stroke="url(#neon-cyan)" stroke-width="3" opacity="0.8" filter="url(#neon-strong)"/>
+  <rect x="272" y="290" width="480" height="260" rx="2" fill="#000000" opacity="0.3"/>
+
+  <!-- Неоновый инициал -->
+  <text x="512" y="480" font-family="Arial Black, sans-serif" font-size="180" font-weight="900" fill="url(#neon-pink)" text-anchor="middle" filter="url(#neon-strong)">F</text>
+
+  <!-- Имя с неоном -->
+  <text x="512" y="650" font-family="Arial, sans-serif" font-size="64" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="14" filter="url(#neon-strong)">FRIZIX</text>
+
+  <!-- Линии сканирования -->
+  <line x1="312" y1="700" x2="712" y2="700" stroke="url(#neon-cyan)" stroke-width="1" opacity="0.4"/>
+
+  <!-- Статус -->
+  <circle cx="512" cy="780" r="5" fill="#00ff88" filter="url(#neon-strong)">
+    <animate attributeName="opacity" values="1;0.3;1" dur="1.5s" repeatCount="indefinite"/>
+  </circle>
+  <text x="512" y="820" font-family="monospace" font-size="18" fill="#00f5ff" text-anchor="middle" letter-spacing="4">[ ONLINE ]</text>
+</svg>

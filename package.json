@@ -8,11 +8,18 @@
     "start": "node bot.js",
     "dev": "node --watch bot.js"
   },
-  "keywords": ["telegram", "bot", "contact", "stats", "anti-spam"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "contact",
+    "stats",
+    "anti-spam"
+  ],
   "author": "markw",
   "license": "MIT",
   "dependencies": {
+    "dotenv": "^16.4.5",
     "grammy": "^1.21.1",
-    "dotenv": "^16.4.5"
+    "sharp": "^0.35.5"
   }
 }

@@ -2,12 +2,10 @@ services:
   - type: web
     name: telegram-contact-bot
     env: node
-    plan: free
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node bot.js
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: OWNER_ID
         sync: false
-    autoDeploy: true

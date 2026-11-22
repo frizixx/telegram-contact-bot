@@ -1,0 +1,25 @@
+<!-- ПРОСТОЙ И ЧЁТКИЙ ЛОГОТИП для маленького размера -->
+<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg">
+      <stop offset="0%" style="stop-color:#001a33;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#000d1a;stop-opacity:1" />
+    </radialGradient>
+    <linearGradient id="letter-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#80deea;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4dd0e1;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Простой тёмный фон -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- Один большой чёткий круг -->
+  <circle cx="512" cy="512" r="380" fill="none" stroke="#00bcd4" stroke-width="3" opacity="0.4"/>
+
+  <!-- Очень большая и чёткая буква F -->
+  <text x="512" y="640" font-family="Arial Black, sans-serif" font-size="420" font-weight="900" fill="url(#letter-grad)" text-anchor="middle">F</text>
+
+  <!-- Маленький статус индикатор (зелёная точка) -->
+  <circle cx="720" cy="720" r="60" fill="#10b981"/>
+</svg>

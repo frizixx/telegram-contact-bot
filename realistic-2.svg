@@ -1,0 +1,44 @@
+<!-- Реалистичный 2: Матовое стекко (Glassmorphism) -->
+<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="mesh-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4f46e5;stop-opacity:1" />
+      <stop offset="30%" style="stop-color:#7c3aed;stop-opacity:1" />
+      <stop offset="70%" style="stop-color:#ec4899;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f97316;stop-opacity:1" />
+    </linearGradient>
+    <filter id="blur-bg">
+      <feGaussianBlur stdDeviation="80"/>
+    </filter>
+    <filter id="glass-blur">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Градиентный фон -->
+  <rect width="1024" height="1024" fill="url(#mesh-bg)"/>
+
+  <!-- Размытые формы для глубины -->
+  <circle cx="250" cy="250" r="300" fill="#ffffff" opacity="0.15" filter="url(#blur-bg)"/>
+  <circle cx="800" cy="600" r="350" fill="#ffffff" opacity="0.12" filter="url(#blur-bg)"/>
+  <ellipse cx="600" cy="300" rx="200" ry="300" fill="#ffffff" opacity="0.1" filter="url(#blur-bg)"/>
+
+  <!-- Стеклянная карточка -->
+  <rect x="162" y="362" width="700" height="300" rx="40" fill="#ffffff" opacity="0.1" filter="url(#glass-blur)"/>
+  <rect x="162" y="362" width="700" height="300" rx="40" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.25"/>
+
+  <!-- Внутреннее свечение -->
+  <rect x="172" y="372" width="680" height="280" rx="35" fill="#ffffff" opacity="0.05"/>
+
+  <!-- Инициал -->
+  <text x="512" y="560" font-family="SF Pro Display, system-ui" font-size="140" font-weight="600" fill="#ffffff" text-anchor="middle">F</text>
+
+  <!-- Имя -->
+  <text x="512" y="800" font-family="SF Pro Display, system-ui" font-size="64" font-weight="300" fill="#ffffff" text-anchor="middle" letter-spacing="10">Frizix</text>
+
+  <!-- Индикатор статуса -->
+  <circle cx="512" cy="880" r="8" fill="#10b981" opacity="0.9">
+    <animate attributeName="r" values="8;10;8" dur="2s" repeatCount="indefinite"/>
+  </circle>
+  <text x="512" y="930" font-family="system-ui" font-size="20" fill="#ffffff" text-anchor="middle" opacity="0.8">Available Now</text>
+</svg>

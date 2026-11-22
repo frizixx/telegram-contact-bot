@@ -58,28 +58,37 @@ loadDB();
 // Антиспам: проверка rate limit
 function checkRateLimit(userId) {
   const now = Date.now();
-  const windowMs = 60000; // 1 минута
-  const maxMessages = 5;
+  const WINDOW_MS = 60000; // 1 минута
+  const MAX_MESSAGES = 5;
+  const BAN_TIME_MS = 300000; // 5 минут бан при превышении
 
   if (!db.rateLimit[userId]) {
-    db.rateLimit[userId] = { count: 1, windowStart: now };
-    return true;
+    db.rateLimit[userId] = { count: 1, windowStart: now, bannedUntil: 0 };
+    return { allowed: true };
   }
 
   const record = db.rateLimit[userId];
 
-  if (now - record.windowStart > windowMs) {
-    // Новое окно
-    db.rateLimit[userId] = { count: 1, windowStart: now };
-    return true;
+  // Проверка, находится ли пользователь в бане
+  if (now < record.bannedUntil) {
+    return { allowed: false, bannedUntil: record.bannedUntil };
   }
 
-  if (record.count >= maxMessages) {
-    return false; // Превышен лимит
+  // Сброс окна, если время вышло
+  if (now - record.windowStart > WINDOW_MS) {
+    record.count = 1;
+    record.windowStart = now;
+    return { allowed: true };
+  }
+
+  // Проверка лимита
+  if (record.count >= MAX_MESSAGES) {
+    record.bannedUntil = now + BAN_TIME_MS;
+    return { allowed: false, bannedUntil: record.bannedUntil };
   }
 
   record.count++;
-  return true;
+  return { allowed: true };
 }
 
 // Проверка блэклиста
@@ -345,9 +354,11 @@ bot.on('message', async (ctx) => {
   }
 
   // Проверка антиспама
-  if (!checkRateLimit(userId)) {
-    await ctx.reply('⚠️ Превышен лимит сообщений. Пожалуйста, подождите некоторое время перед повторной отправкой.');
-    log('warning', 'Rate limit exceeded', { userId });
+  const rateLimitResult = checkRateLimit(userId);
+  if (!rateLimitResult.allowed) {
+    const banTimeRemaining = Math.ceil((rateLimitResult.bannedUntil - Date.now()) / 60000);
+    await ctx.reply(`⚠️ Превышен лимит сообщений. Вы временно заблокированы на ${banTimeRemaining} минут.`);
+    log('warning', 'Rate limit exceeded, user banned', { userId, bannedUntil: rateLimitResult.bannedUntil });
     return;
   }
 

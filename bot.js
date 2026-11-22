@@ -113,13 +113,7 @@ bot.command('start', async (ctx) => {
   } else {
     // Отправляем логотип и GIF с приветствием
     try {
-      const logoPath = process.env.FLY_APP_NAME ? '/app/bot-logo.png' : join(__dirname, 'bot-logo.png');
       const gifPath = process.env.FLY_APP_NAME ? '/app/greeting.gif' : join(__dirname, 'greeting.gif');
-
-      // Отправляем логотип
-      if (existsSync(logoPath)) {
-        await ctx.replyWithPhoto(new InputFile(logoPath));
-      }
 
       // Отправляем GIF с текстом
       if (existsSync(gifPath)) {

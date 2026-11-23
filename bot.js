@@ -18,9 +18,9 @@ const DB_FILE = process.env.DB_PATH || (process.env.FLY_APP_NAME ? '/tmp/bot-dat
 
 // [FIX-1] Map: messageId владельца → userId отправителя
 //   Ключ — message_id того сообщения, которое бот отправил в чат владельца.
-//   Живёт только в RAM (не сериализуется): после рестарта старые треды
-//   падают обратно на regex-фоллбэк, новые — сразу в Map.
+//   Сохраняется также в db.msgMap (до 1000 записей) для устойчивости к рестартам.
 const msgMap = new Map(); // Map<ownerMsgId: number, senderUserId: number>
+const pendingBroadcasts = new Map(); // Map<broadcastId: string, { text, recipients, createdAt }>
 
 // Инициализация БД
 let db = {
@@ -33,7 +33,8 @@ let db = {
     { id: 3, label: '✅ Принято', text: 'Ваше сообщение принято. Обработаю в течение дня.' }
   ],
   autoReplySent: {}, // Кому уже отправлен автоответ
-  ownerLastActivity: Date.now() // Последняя активность владельца
+  ownerLastActivity: Date.now(), // Последняя активность владельца
+  msgMap: {} // Кэш связей message_id -> userId
 };
 
 // Загрузка БД (синхронно, только при старте — это нормально)
@@ -42,10 +43,39 @@ function loadDB() {
     if (existsSync(DB_FILE)) {
       const data = readFileSync(DB_FILE, 'utf8');
       db = JSON.parse(data);
-      log('info', 'Database loaded successfully');
+      if (!db.msgMap) db.msgMap = {};
+      // Восстанавливаем сохранённые связки сообщений в Map
+      for (const [mId, uId] of Object.entries(db.msgMap)) {
+        msgMap.set(Number(mId), Number(uId));
+      }
+      log('info', 'Database loaded successfully', { cachedMsgMapSize: Object.keys(db.msgMap).length });
     }
   } catch (error) {
     log('warning', 'Could not load database, using defaults', { error: error.message });
+  }
+}
+
+// Регистрация message_id в памяти и в БД
+function registerMsgMap(msgId, userId) {
+  if (!msgId || !userId) return;
+  const numMsgId = Number(msgId);
+  const numUserId = Number(userId);
+
+  msgMap.set(numMsgId, numUserId);
+
+  if (!db.msgMap) db.msgMap = {};
+  db.msgMap[String(numMsgId)] = numUserId;
+
+  // Ограничиваем персистентный кэш до 1000 записей
+  const keys = Object.keys(db.msgMap);
+  if (keys.length > 1000) {
+    delete db.msgMap[keys[0]];
+  }
+
+  // Ограничиваем RAM Map до 10000 записей
+  if (msgMap.size > 10000) {
+    const firstKey = msgMap.keys().next().value;
+    msgMap.delete(firstKey);
   }
 }
 
@@ -155,6 +185,7 @@ bot.command('start', async (ctx) => {
       '👑 *Режим владельца активен*\n\n' +
       '📋 Доступные команды:\n' +
       '/stats — Статистика бота\n' +
+      '/broadcast <текст> — Массовая рассылка всем пользователям\n' +
       '/block <user_id> — Заблокировать пользователя\n' +
       '/unblock <user_id> — Разблокировать\n' +
       '/blocklist — Список заблокированных\n' +
@@ -399,6 +430,61 @@ bot.command('offline', async (ctx) => {
   log('info', 'Owner marked as offline, auto-reply enabled');
 });
 
+// Команда рассылки /broadcast <текст>
+bot.command('broadcast', async (ctx) => {
+  if (ctx.from.id !== OWNER_ID) return;
+
+  const rawText = ctx.message.text.slice('/broadcast'.length).trim();
+  if (!rawText) {
+    await ctx.reply(
+      '📢 *Использование:*\n' +
+      '`/broadcast <текст рассылки>`\n\n' +
+      '*Пример:*\n' +
+      '`/broadcast Всем привет! Бот был обновлён, добавлены новые функции.`',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // Уникальные пользователи из сохранённых сообщений (кроме владельца и заблокированных)
+  const uniqueUsers = [...new Set(
+    db.messages
+      .map(m => m.userId)
+      .filter(id => id && id !== OWNER_ID && !isBlocked(id))
+  )];
+
+  if (uniqueUsers.length === 0) {
+    await ctx.reply('⚠️ В базе данных пока нет пользователей для рассылки.');
+    return;
+  }
+
+  const broadcastId = Date.now().toString();
+  pendingBroadcasts.set(broadcastId, {
+    text: rawText,
+    recipients: uniqueUsers,
+    createdAt: Date.now()
+  });
+
+  // Автоматическая очистка неподтверждённой рассылки через 10 минут
+  setTimeout(() => pendingBroadcasts.delete(broadcastId), 10 * 60 * 1000);
+
+  const preview =
+    `📢 *Предпросмотр рассылки*\n\n` +
+    `💬 *Текст:*\n${escapeMarkdown(rawText)}\n\n` +
+    `👥 Получателей: *${uniqueUsers.length}* чел.\n\n` +
+    `_Подтвердите отправку сообщения всем пользователям:_`;
+
+  const keyboard = new InlineKeyboard()
+    .text('✅ Подтвердить отправку', `bc_confirm_${broadcastId}`)
+    .text('❌ Отмена', `bc_cancel_${broadcastId}`);
+
+  await ctx.reply(preview, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
+  });
+  log('info', 'Broadcast preview initiated', { recipientCount: uniqueUsers.length });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Обработка сообщений
 // ─────────────────────────────────────────────────────────────────────────────
@@ -434,27 +520,45 @@ bot.on('message', async (ctx) => {
 
         try {
           const replyText = ctx.message.text || ctx.message.caption || '[медиа]';
+          const captionText = ctx.message.caption ? `💬 Ответ:\n\n${ctx.message.caption}` : '💬 Ответ';
 
           if (ctx.message.photo) {
             const photo = ctx.message.photo[ctx.message.photo.length - 1];
+            await bot.api.sendChatAction(targetUserId, 'upload_photo');
             await bot.api.sendPhoto(targetUserId, photo.file_id, {
-              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
+              caption: captionText
             });
           } else if (ctx.message.video) {
+            await bot.api.sendChatAction(targetUserId, 'upload_video');
             await bot.api.sendVideo(targetUserId, ctx.message.video.file_id, {
-              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
+              caption: captionText
+            });
+          } else if (ctx.message.animation) {
+            await bot.api.sendChatAction(targetUserId, 'upload_video');
+            await bot.api.sendAnimation(targetUserId, ctx.message.animation.file_id, {
+              caption: captionText
             });
           } else if (ctx.message.document) {
+            await bot.api.sendChatAction(targetUserId, 'upload_document');
             await bot.api.sendDocument(targetUserId, ctx.message.document.file_id, {
-              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
+              caption: captionText
             });
           } else if (ctx.message.voice) {
+            await bot.api.sendChatAction(targetUserId, 'record_voice');
             await bot.api.sendVoice(targetUserId, ctx.message.voice.file_id);
           } else if (ctx.message.audio) {
+            await bot.api.sendChatAction(targetUserId, 'upload_voice');
             await bot.api.sendAudio(targetUserId, ctx.message.audio.file_id, {
-              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
+              caption: captionText
             });
+          } else if (ctx.message.sticker) {
+            await bot.api.sendChatAction(targetUserId, 'choose_sticker');
+            await bot.api.sendSticker(targetUserId, ctx.message.sticker.file_id);
+          } else if (ctx.message.video_note) {
+            await bot.api.sendChatAction(targetUserId, 'record_video_note');
+            await bot.api.sendVideoNote(targetUserId, ctx.message.video_note.file_id);
           } else {
+            await bot.api.sendChatAction(targetUserId, 'typing');
             await bot.api.sendMessage(targetUserId, `💬 Ответ:\n\n${replyText}`);
           }
 
@@ -474,6 +578,8 @@ bot.on('message', async (ctx) => {
           await ctx.reply(`❌ Ошибка отправки: ${error.message}`);
           log('error', 'Failed to send reply', { error: error.message });
         }
+      } else {
+        await ctx.reply('⚠️ Не удалось определить пользователя для ответа. Попробуйте нажать "Ответить" на карточку с User ID.');
       }
     }
     return;
@@ -510,13 +616,14 @@ bot.on('message', async (ctx) => {
   const messageText = ctx.message.text || ctx.message.caption || '[медиа без текста]';
   const messageType = ctx.message.photo      ? '📸 фото'      :
                       ctx.message.video      ? '🎥 видео'     :
+                      ctx.message.animation  ? '🎞 GIF'       :
                       ctx.message.document   ? '📄 документ'  :
                       ctx.message.sticker    ? '🎨 стикер'    :
                       ctx.message.voice      ? '🎤 голосовое' :
                       ctx.message.audio      ? '🎵 аудио'     :
                       ctx.message.video_note ? '⭕ кружочек'  : '📝 текст'; // [NEW-7]
 
-  // Сохраняем в БД
+  // Сохраняем в БД (ограничиваем до 300 последних сообщений для экономии ресурсов)
   db.messages.push({
     userId: user.id,
     username: user.username,
@@ -526,6 +633,10 @@ bot.on('message', async (ctx) => {
     messageType,
     createdAt: new Date().toISOString()
   });
+
+  if (db.messages.length > 300) {
+    db.messages.splice(0, db.messages.length - 300);
+  }
   saveDB();
 
   const userMsgCount = db.messages.filter(m => m.userId === user.id).length;
@@ -546,8 +657,14 @@ bot.on('message', async (ctx) => {
     forwardMessage += `💬 Сообщение:\n${escapeMarkdown(messageText)}`;
   }
 
+  // Безопасный caption для медиа (лимит Telegram 1024 символа)
+  const safeCaption = forwardMessage.length > 1024
+    ? forwardMessage.slice(0, 1020) + '...'
+    : forwardMessage;
+
   try {
     let sentMsg; // сообщение, отправленное владельцу
+    let mediaMsg; // медиа-сообщение (для стикеров, войсов, кружочков)
 
     // [NEW-3] Клавиатура прикрепляется прямо к форварду
     const keyboard = new InlineKeyboard();
@@ -559,25 +676,31 @@ bot.on('message', async (ctx) => {
     if (ctx.message.photo) {
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
       sentMsg = await bot.api.sendPhoto(OWNER_ID, photo.file_id, {
-        caption: forwardMessage,
+        caption: safeCaption,
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
     } else if (ctx.message.video) {
       sentMsg = await bot.api.sendVideo(OWNER_ID, ctx.message.video.file_id, {
-        caption: forwardMessage,
+        caption: safeCaption,
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    } else if (ctx.message.animation) {
+      sentMsg = await bot.api.sendAnimation(OWNER_ID, ctx.message.animation.file_id, {
+        caption: safeCaption,
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
     } else if (ctx.message.document) {
       sentMsg = await bot.api.sendDocument(OWNER_ID, ctx.message.document.file_id, {
-        caption: forwardMessage,
+        caption: safeCaption,
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
     } else if (ctx.message.audio) {
       sentMsg = await bot.api.sendAudio(OWNER_ID, ctx.message.audio.file_id, {
-        caption: forwardMessage,
+        caption: safeCaption,
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
@@ -587,19 +710,19 @@ bot.on('message', async (ctx) => {
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
-      await bot.api.sendSticker(OWNER_ID, ctx.message.sticker.file_id);
+      mediaMsg = await bot.api.sendSticker(OWNER_ID, ctx.message.sticker.file_id);
     } else if (ctx.message.voice) {
       sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
-      await bot.api.sendVoice(OWNER_ID, ctx.message.voice.file_id);
+      mediaMsg = await bot.api.sendVoice(OWNER_ID, ctx.message.voice.file_id);
     } else if (ctx.message.video_note) {
       sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
-      await bot.api.sendVideoNote(OWNER_ID, ctx.message.video_note.file_id);
+      mediaMsg = await bot.api.sendVideoNote(OWNER_ID, ctx.message.video_note.file_id);
     } else {
       sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
         parse_mode: 'Markdown',
@@ -607,14 +730,16 @@ bot.on('message', async (ctx) => {
       });
     }
 
-    // [FIX-1] Регистрируем в Map: msgId → userId
-    if (sentMsg?.message_id) {
-      msgMap.set(sentMsg.message_id, user.id);
-      if (msgMap.size > 10000) {
-        const firstKey = msgMap.keys().next().value;
-        msgMap.delete(firstKey);
-      }
+    // Если caption был урезан, отправляем полный текст отдельным сообщением
+    if (forwardMessage.length > 1024 && messageText !== '[медиа без текста]') {
+      await bot.api.sendMessage(OWNER_ID, `💬 *Полный текст сообщения:*\n${escapeMarkdown(messageText)}`, {
+        parse_mode: 'Markdown'
+      });
     }
+
+    // Регистрируем ОБА сообщения (и карточку, и отдельный медиа-файл)
+    registerMsgMap(sentMsg?.message_id, user.id);
+    registerMsgMap(mediaMsg?.message_id, user.id);
 
     // Подтверждаем пользователю
     await ctx.reply(
@@ -649,7 +774,50 @@ bot.on('message', async (ctx) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Callback кнопки (быстрые ответы)
+// Обработка отредактированных сообщений
+// ─────────────────────────────────────────────────────────────────────────────
+
+bot.on('edited_message', async (ctx) => {
+  const editedMsg = ctx.update.edited_message || ctx.msg;
+  if (!editedMsg) return;
+
+  const userId = editedMsg.from?.id;
+  if (!userId || userId === OWNER_ID) return;
+  if (isBlocked(userId)) return;
+
+  const user = editedMsg.from;
+  const newText = editedMsg.text || editedMsg.caption || '[медиа]';
+
+  // Игнорируем команды
+  if (typeof newText === 'string' && newText.startsWith('/')) return;
+
+  const editNotice =
+    `✏️ *Сообщение отредактировано!*\n\n` +
+    `👤 User ID: ${user.id}\n` +
+    `👤 Username: ${user.username ? '@' + escapeMarkdown(user.username) : 'Не указан'}\n` +
+    `📝 Имя: ${escapeMarkdown(user.first_name)}${user.last_name ? ' ' + escapeMarkdown(user.last_name) : ''}\n\n` +
+    `💬 *Новый текст:*\n${escapeMarkdown(newText)}`;
+
+  const keyboard = new InlineKeyboard();
+  db.quickReplies.slice(0, 3).forEach(r => {
+    keyboard.text(r.label, `qr_${r.id}_${user.id}`).row();
+  });
+  keyboard.text('🚫 Заблокировать', `block_${user.id}`);
+
+  try {
+    const sentMsg = await bot.api.sendMessage(OWNER_ID, editNotice, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+    registerMsgMap(sentMsg?.message_id, user.id);
+    log('info', 'Edited message notification forwarded to owner', { userId });
+  } catch (err) {
+    log('error', 'Failed to forward edited message notification', { error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Callback кнопки (быстрые ответы, блокировка, рассылка)
 // ─────────────────────────────────────────────────────────────────────────────
 
 bot.on('callback_query:data', async (ctx) => {
@@ -659,6 +827,80 @@ bot.on('callback_query:data', async (ctx) => {
   }
 
   const data = ctx.callbackQuery.data;
+
+  // [BROADCAST] Подтверждение рассылки
+  if (data.startsWith('bc_confirm_')) {
+    const broadcastId = data.replace('bc_confirm_', '');
+    const broadcast = pendingBroadcasts.get(broadcastId);
+
+    if (!broadcast) {
+      await ctx.answerCallbackQuery({ text: '⚠️ Рассылка устарела или уже выполнена' });
+      try {
+        await ctx.editMessageText('⚠️ Срок действия подтверждения рассылки истёк.');
+      } catch (e) {}
+      return;
+    }
+
+    pendingBroadcasts.delete(broadcastId);
+    await ctx.answerCallbackQuery({ text: '🚀 Запуск рассылки...' });
+
+    try {
+      await ctx.editMessageText(
+        `🚀 *Рассылка началась...*\n\n` +
+        `Всего получателей: *${broadcast.recipients.length}*\n` +
+        `_Пожалуйста, подождите завершения._`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (e) {}
+
+    let sentCount = 0;
+    let failCount = 0;
+
+    for (const targetUserId of broadcast.recipients) {
+      try {
+        await bot.api.sendMessage(
+          targetUserId,
+          `📢 *Объявление от Frizix:*\n\n${broadcast.text}`,
+          { parse_mode: 'Markdown' }
+        );
+        sentCount++;
+      } catch (err) {
+        // Фоллбэк без Markdown на случай спецсимволов в тексте
+        try {
+          await bot.api.sendMessage(targetUserId, `📢 Объявление от Frizix:\n\n${broadcast.text}`);
+          sentCount++;
+        } catch (plainErr) {
+          failCount++;
+          log('warning', `Failed to send broadcast to user ${targetUserId}`, { error: plainErr.message });
+        }
+      }
+
+      // Пауза 40 мс между отправками для соблюдения лимитов Telegram (30 сообщений/сек)
+      await new Promise(res => setTimeout(res, 40));
+    }
+
+    await ctx.reply(
+      `✅ *Рассылка завершена!*\n\n` +
+      `📬 Успешно доставлено: *${sentCount}*\n` +
+      `❌ Ошибок (заблокировали бота и др.): *${failCount}*\n` +
+      `👥 Всего адресатов: *${broadcast.recipients.length}*`,
+      { parse_mode: 'Markdown' }
+    );
+    log('success', 'Broadcast finished', { sentCount, failCount, total: broadcast.recipients.length });
+    return;
+  }
+
+  // [BROADCAST] Отмена рассылки
+  if (data.startsWith('bc_cancel_')) {
+    const broadcastId = data.replace('bc_cancel_', '');
+    pendingBroadcasts.delete(broadcastId);
+    await ctx.answerCallbackQuery({ text: '❌ Рассылка отменена' });
+    try {
+      await ctx.editMessageText('❌ *Рассылка отменена.*', { parse_mode: 'Markdown' });
+    } catch (e) {}
+    log('info', 'Broadcast canceled by owner');
+    return;
+  }
 
   if (data.startsWith('qr_')) {
     const parts = data.split('_');

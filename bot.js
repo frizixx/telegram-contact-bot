@@ -168,6 +168,12 @@ bot.command('start', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
   } else {
+    // Проверка блокировки при /start
+    if (isBlocked(ctx.from.id)) {
+      await ctx.reply('🚫 Вы заблокированы и не можете использовать этого бота.');
+      return;
+    }
+
     try {
       const gifPath = process.env.FLY_APP_NAME ? '/app/greeting.gif' : join(__dirname, 'greeting.gif');
 
@@ -349,7 +355,7 @@ bot.command('qr', async (ctx) => {
   }
 });
 
-// [NEW-4] /blocklist — просмотр заблокированных
+// [NEW-4] /blocklist — просмотр заблокированных с кнопками разблокировки
 bot.command('blocklist', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
@@ -359,15 +365,17 @@ bot.command('blocklist', async (ctx) => {
   }
 
   let text = `🚫 *Заблокированные пользователи* (${db.blocklist.length}):\n\n`;
+  const keyboard = new InlineKeyboard();
+
   db.blocklist.forEach((u, i) => {
     const date = new Date(u.blockedAt).toLocaleDateString('ru-RU');
     text += `${i + 1}. ID: \`${u.userId}\`\n`;
     text += `   Причина: ${escapeMarkdown(u.reason)}\n`;
     text += `   Дата: ${date}\n\n`;
+    keyboard.text(`🟢 Разблокировать ${u.userId}`, `unblock_${u.userId}`).row();
   });
-  text += 'Разблокировать: `/unblock <id>`';
 
-  await ctx.reply(text, { parse_mode: 'Markdown' });
+  await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
   log('info', 'Blocklist requested by owner');
 });
 
@@ -474,6 +482,17 @@ bot.on('message', async (ctx) => {
   // Проверка блэклиста
   if (isBlocked(userId)) {
     log('warning', 'Blocked user tried to message', { userId });
+    const now = Date.now();
+    // Антифлуд уведомлениями о блоке (не чаще 1 раза в 5 секунд)
+    if (!db.rateLimit[userId] || (now - (db.rateLimit[userId].lastBlockedReply || 0) > 5000)) {
+      if (!db.rateLimit[userId]) db.rateLimit[userId] = { count: 0, windowStart: now, bannedUntil: 0 };
+      db.rateLimit[userId].lastBlockedReply = now;
+      try {
+        await ctx.reply('🚫 Вы заблокированы и не можете отправлять сообщения.');
+      } catch (e) {
+        log('error', 'Failed to send blocked notification to user', { error: e.message });
+      }
+    }
     return;
   }
 
@@ -652,7 +671,7 @@ bot.on('callback_query:data', async (ctx) => {
       try {
         await bot.api.sendMessage(targetUserId, `💬 Ответ от владельца:\n\n${quickReply.text}`);
         await ctx.answerCallbackQuery({ text: '✅ Быстрый ответ отправлен!' });
-        await ctx.editMessageText(`✅ Быстрый ответ "${quickReply.label}" отправлен пользователю ${targetUserId}!`);
+        await ctx.reply(`✅ Быстрый ответ "${quickReply.label}" отправлен пользователю ${targetUserId}!`);
         log('success', 'Quick reply sent via button', { targetUserId, replyId });
       } catch (error) {
         await ctx.answerCallbackQuery({ text: `❌ Ошибка: ${error.message}` });
@@ -667,21 +686,66 @@ bot.on('callback_query:data', async (ctx) => {
   if (data.startsWith('block_')) {
     const targetUserId = parseInt(data.split('_')[1]);
 
-    if (isBlocked(targetUserId)) {
-      await ctx.answerCallbackQuery({ text: '⚠️ Уже заблокирован' });
-      return;
+    if (!isBlocked(targetUserId)) {
+      db.blocklist.push({
+        userId: targetUserId,
+        reason: 'Заблокирован кнопкой',
+        blockedAt: new Date().toISOString()
+      });
+      saveDB();
     }
 
-    db.blocklist.push({
-      userId: targetUserId,
-      reason: 'Заблокирован кнопкой',
-      blockedAt: new Date().toISOString()
-    });
-    saveDB();
-
     await ctx.answerCallbackQuery({ text: '🚫 Пользователь заблокирован' });
-    await ctx.editMessageText(`🚫 Пользователь ${targetUserId} заблокирован.`);
+
+    // Меняем кнопку на "Разблокировать"
+    const kb = new InlineKeyboard().text('🟢 Разблокировать', `unblock_${targetUserId}`);
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: kb });
+    } catch (e) {}
     log('warning', 'User blocked via button', { targetUserId });
+  }
+
+  // [NEW-3] Кнопка "Разблокировать"
+  if (data.startsWith('unblock_')) {
+    const targetUserId = parseInt(data.split('_')[1]);
+
+    const index = db.blocklist.findIndex(u => u.userId === targetUserId);
+    if (index !== -1) {
+      db.blocklist.splice(index, 1);
+      saveDB();
+    }
+
+    await ctx.answerCallbackQuery({ text: `✅ Пользователь ${targetUserId} разблокирован` });
+
+    try {
+      const msgText = ctx.callbackQuery.message?.text || '';
+      // Если нажато в /blocklist — обновляем список
+      if (msgText.includes('Заблокированные пользователи')) {
+        if (db.blocklist.length === 0) {
+          await ctx.editMessageText('✅ Список блокировок пуст.');
+        } else {
+          let text = `🚫 *Заблокированные пользователи* (${db.blocklist.length}):\n\n`;
+          const keyboard = new InlineKeyboard();
+          db.blocklist.forEach((u, i) => {
+            const date = new Date(u.blockedAt).toLocaleDateString('ru-RU');
+            text += `${i + 1}. ID: \`${u.userId}\`\n`;
+            text += `   Причина: ${escapeMarkdown(u.reason)}\n`;
+            text += `   Дата: ${date}\n\n`;
+            keyboard.text(`🟢 Разблокировать ${u.userId}`, `unblock_${u.userId}`).row();
+          });
+          await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+        }
+      } else {
+        // Под сообщением — возвращаем исходные кнопки
+        const keyboard = new InlineKeyboard();
+        db.quickReplies.slice(0, 3).forEach(r => {
+          keyboard.text(r.label, `qr_${r.id}_${targetUserId}`).row();
+        });
+        keyboard.text('🚫 Заблокировать', `block_${targetUserId}`);
+        await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+      }
+    } catch (e) {}
+    log('info', 'User unblocked via button', { targetUserId });
   }
 });
 

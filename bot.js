@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { config } from 'dotenv';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { writeFile } from 'fs/promises';           // [FIX-2] async writeFile
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -14,6 +15,12 @@ const OWNER_ID = parseInt(process.env.OWNER_ID);
 
 // JSON база данных - используем /tmp везде на серверах
 const DB_FILE = process.env.DB_PATH || (process.env.FLY_APP_NAME ? '/tmp/bot-data.json' : process.env.RAILWAY_ENVIRONMENT ? '/tmp/bot-data.json' : join(__dirname, 'bot-data.json'));
+
+// [FIX-1] Map: messageId владельца → userId отправителя
+//   Ключ — message_id того сообщения, которое бот отправил в чат владельца.
+//   Живёт только в RAM (не сериализуется): после рестарта старые треды
+//   падают обратно на regex-фоллбэк, новые — сразу в Map.
+const msgMap = new Map(); // Map<ownerMsgId: number, senderUserId: number>
 
 // Инициализация БД
 let db = {
@@ -29,7 +36,7 @@ let db = {
   ownerLastActivity: Date.now() // Последняя активность владельца
 };
 
-// Загрузка БД
+// Загрузка БД (синхронно, только при старте — это нормально)
 function loadDB() {
   try {
     if (existsSync(DB_FILE)) {
@@ -42,13 +49,27 @@ function loadDB() {
   }
 }
 
-// Сохранение БД
-function saveDB() {
+// [FIX-2] Сохранение БД — async, не блокирует event loop
+let _saveInProgress = false;
+let _savePending = false;
+
+async function saveDB() {
+  if (_saveInProgress) {
+    // Запомним, что нужно ещё одно сохранение после текущего
+    _savePending = true;
+    return;
+  }
+  _saveInProgress = true;
   try {
-    writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
+    await writeFile(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
   } catch (error) {
     log('error', 'Failed to save database', { error: error.message });
-    // Не падаем, просто логируем ошибку
+  } finally {
+    _saveInProgress = false;
+    if (_savePending) {
+      _savePending = false;
+      saveDB(); // сохраняем накопившееся
+    }
   }
 }
 
@@ -58,7 +79,7 @@ loadDB();
 // Антиспам: проверка rate limit
 function checkRateLimit(userId) {
   const now = Date.now();
-  const WINDOW_MS = 60000; // 1 минута
+  const WINDOW_MS = 60000;   // 1 минута
   const MAX_MESSAGES = 5;
   const BAN_TIME_MS = 300000; // 5 минут бан при превышении
 
@@ -69,19 +90,16 @@ function checkRateLimit(userId) {
 
   const record = db.rateLimit[userId];
 
-  // Проверка, находится ли пользователь в бане
   if (now < record.bannedUntil) {
     return { allowed: false, bannedUntil: record.bannedUntil };
   }
 
-  // Сброс окна, если время вышло
   if (now - record.windowStart > WINDOW_MS) {
     record.count = 1;
     record.windowStart = now;
     return { allowed: true };
   }
 
-  // Проверка лимита
   if (record.count >= MAX_MESSAGES) {
     record.bannedUntil = now + BAN_TIME_MS;
     return { allowed: false, bannedUntil: record.bannedUntil };
@@ -96,6 +114,11 @@ function isBlocked(userId) {
   return db.blocklist.some(u => u.userId === userId);
 }
 
+// [FIX-6] Экранирование спецсимволов Markdown v1
+function escapeMarkdown(text) {
+  return String(text).replace(/([_*`\[])/g, '\\$1');
+}
+
 // Логирование
 function log(type, message, data = {}) {
   const timestamp = new Date().toISOString();
@@ -103,7 +126,29 @@ function log(type, message, data = {}) {
   console.log(`${emoji} [${timestamp}] ${message}`, JSON.stringify(data));
 }
 
-// Команда /start
+// [FIX-3] Очистка autoReplySent старше 24 часов
+function cleanAutoReplySent() {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000; // 24 часа
+  let cleaned = 0;
+  for (const [userId, ts] of Object.entries(db.autoReplySent)) {
+    if (ts < cutoff) {
+      delete db.autoReplySent[userId];
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    saveDB();
+    log('info', `Cleaned ${cleaned} stale autoReplySent entries`);
+  }
+}
+
+// Запускаем очистку раз в час
+setInterval(cleanAutoReplySent, 60 * 60 * 1000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Команды
+// ─────────────────────────────────────────────────────────────────────────────
+
 bot.command('start', async (ctx) => {
   if (ctx.from.id === OWNER_ID) {
     await ctx.reply(
@@ -112,7 +157,10 @@ bot.command('start', async (ctx) => {
       '/stats — Статистика бота\n' +
       '/block <user_id> — Заблокировать пользователя\n' +
       '/unblock <user_id> — Разблокировать\n' +
-      '/quickreplies — Управление быстрыми ответами\n' +
+      '/blocklist — Список заблокированных\n' +
+      '/quickreplies — Просмотр быстрых ответов\n' +
+      '/qr add <Название | текст> — Добавить быстрый ответ\n' +
+      '/qr del <id> — Удалить быстрый ответ\n' +
       '/online — Отметиться как онлайн (отключит автоответчик)\n' +
       '/offline — Включить автоответчик\n\n' +
       '💬 Чтобы ответить пользователю — используй Reply на его сообщение\n\n' +
@@ -120,11 +168,9 @@ bot.command('start', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
   } else {
-    // Отправляем логотип и GIF с приветствием
     try {
       const gifPath = process.env.FLY_APP_NAME ? '/app/greeting.gif' : join(__dirname, 'greeting.gif');
 
-      // Отправляем GIF с текстом
       if (existsSync(gifPath)) {
         await ctx.replyWithAnimation(new InputFile(gifPath), {
           caption: 'Hi!\n' +
@@ -133,7 +179,6 @@ bot.command('start', async (ctx) => {
                    '⏱️ Среднее время ответа: от нескольких часов до 1 рабочего дня.'
         });
       } else {
-        // Если GIF не найден, отправляем только текст
         await ctx.reply(
           'Hi!\n' +
           'Это контактный бот для связи с Frizix.\n\n' +
@@ -143,7 +188,6 @@ bot.command('start', async (ctx) => {
       }
     } catch (error) {
       log('error', 'Failed to send greeting media', { error: error.message });
-      // Fallback на текст
       await ctx.reply(
         'Hi!\n' +
         'Это контактный бот для связи с Frizix.\n\n' +
@@ -155,7 +199,6 @@ bot.command('start', async (ctx) => {
   log('info', 'User started bot', { userId: ctx.from.id, username: ctx.from.username });
 });
 
-// Команда /stats (только для владельца)
 bot.command('stats', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
@@ -166,7 +209,6 @@ bot.command('stats', async (ctx) => {
   const today = new Date().toISOString().split('T')[0];
   const todayMessages = db.messages.filter(m => m.createdAt.startsWith(today)).length;
 
-  // Последние 5 уникальных пользователей
   const recentUsers = [];
   const seenUsers = new Set();
   for (let i = db.messages.length - 1; i >= 0 && recentUsers.length < 5; i--) {
@@ -192,7 +234,6 @@ bot.command('stats', async (ctx) => {
   log('info', 'Stats requested by owner');
 });
 
-// Команда /block (только для владельца)
 bot.command('block', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
@@ -210,18 +251,13 @@ bot.command('block', async (ctx) => {
     return;
   }
 
-  db.blocklist.push({
-    userId: targetUserId,
-    reason,
-    blockedAt: new Date().toISOString()
-  });
+  db.blocklist.push({ userId: targetUserId, reason, blockedAt: new Date().toISOString() });
   saveDB();
 
   await ctx.reply(`✅ Пользователь ${targetUserId} заблокирован.\nПричина: ${reason}`);
   log('warning', 'User blocked', { targetUserId, reason });
 });
 
-// Команда /unblock (только для владельца)
 bot.command('unblock', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
@@ -232,7 +268,6 @@ bot.command('unblock', async (ctx) => {
   }
 
   const targetUserId = parseInt(args[1]);
-
   const index = db.blocklist.findIndex(u => u.userId === targetUserId);
   if (index === -1) {
     await ctx.reply('⚠️ Пользователь не был заблокирован.');
@@ -246,21 +281,96 @@ bot.command('unblock', async (ctx) => {
   log('info', 'User unblocked', { targetUserId });
 });
 
-// Команда /quickreplies (только для владельца)
 bot.command('quickreplies', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
   let text = '⚡ *Быстрые ответы*\n\n';
-  db.quickReplies.forEach(r => {
-    text += `${r.id}. ${r.label}\n_"${r.text}"_\n\n`;
-  });
-
-  text += 'Используй их когда отвечаешь на сообщения (кнопки появятся после отправки)!';
+  if (db.quickReplies.length === 0) {
+    text += '_Список пуст._\n\n';
+  } else {
+    db.quickReplies.forEach(r => {
+      text += `${r.id}. ${r.label}\n_"${escapeMarkdown(r.text)}"_\n\n`;
+    });
+  }
+  text +=
+    'Используй их когда отвечаешь на сообщения \\(кнопки появятся после отправки\\)\\!\n\n' +
+    '*Управление:*\n' +
+    '`/qr add <эмодзи Название | текст ответа>` — добавить\n' +
+    '`/qr del <id>` — удалить';
 
   await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
-// Команда /online (только для владельца)
+// [NEW-2] /qr add <эмодзи Название | текст> и /qr del <id>
+bot.command('qr', async (ctx) => {
+  if (ctx.from.id !== OWNER_ID) return;
+
+  const full = ctx.message.text.slice('/qr '.length).trim();
+  const [sub, ...rest] = full.split(' ');
+
+  if (sub === 'add') {
+    // Формат: /qr add 🙏 Спасибо | Большое спасибо за обращение!
+    const combined = rest.join(' ');
+    const pipeIdx = combined.indexOf('|');
+    if (pipeIdx === -1) {
+      await ctx.reply('Формат: `/qr add <Название | текст ответа>`', { parse_mode: 'Markdown' });
+      return;
+    }
+    const label = combined.slice(0, pipeIdx).trim();
+    const text  = combined.slice(pipeIdx + 1).trim();
+    if (!label || !text) {
+      await ctx.reply('Название и текст не могут быть пустыми.');
+      return;
+    }
+    const newId = db.quickReplies.length
+      ? Math.max(...db.quickReplies.map(r => r.id)) + 1
+      : 1;
+    db.quickReplies.push({ id: newId, label, text });
+    saveDB();
+    await ctx.reply(`✅ Быстрый ответ #${newId} добавлен:\n*${escapeMarkdown(label)}*\n_"${escapeMarkdown(text)}"_`, { parse_mode: 'Markdown' });
+
+  } else if (sub === 'del') {
+    const delId = parseInt(rest[0]);
+    if (isNaN(delId)) {
+      await ctx.reply('Формат: `/qr del <id>`', { parse_mode: 'Markdown' });
+      return;
+    }
+    const idx = db.quickReplies.findIndex(r => r.id === delId);
+    if (idx === -1) {
+      await ctx.reply(`⚠️ Быстрый ответ #${delId} не найден.`);
+      return;
+    }
+    const removed = db.quickReplies.splice(idx, 1)[0];
+    saveDB();
+    await ctx.reply(`✅ Быстрый ответ #${delId} «${removed.label}» удалён.`);
+
+  } else {
+    await ctx.reply('Команды: `/qr add <Название | текст>` или `/qr del <id>`', { parse_mode: 'Markdown' });
+  }
+});
+
+// [NEW-4] /blocklist — просмотр заблокированных
+bot.command('blocklist', async (ctx) => {
+  if (ctx.from.id !== OWNER_ID) return;
+
+  if (db.blocklist.length === 0) {
+    await ctx.reply('✅ Список блокировок пуст.');
+    return;
+  }
+
+  let text = `🚫 *Заблокированные пользователи* (${db.blocklist.length}):\n\n`;
+  db.blocklist.forEach((u, i) => {
+    const date = new Date(u.blockedAt).toLocaleDateString('ru-RU');
+    text += `${i + 1}. ID: \`${u.userId}\`\n`;
+    text += `   Причина: ${escapeMarkdown(u.reason)}\n`;
+    text += `   Дата: ${date}\n\n`;
+  });
+  text += 'Разблокировать: `/unblock <id>`';
+
+  await ctx.reply(text, { parse_mode: 'Markdown' });
+  log('info', 'Blocklist requested by owner');
+});
+
 bot.command('online', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
@@ -271,11 +381,9 @@ bot.command('online', async (ctx) => {
   log('info', 'Owner marked as online');
 });
 
-// Команда /offline (только для владельца)
 bot.command('offline', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) return;
 
-  // Устанавливаем время последней активности в прошлое (>5 минут назад)
   db.ownerLastActivity = Date.now() - (10 * 60 * 1000);
   saveDB();
 
@@ -283,23 +391,34 @@ bot.command('offline', async (ctx) => {
   log('info', 'Owner marked as offline, auto-reply enabled');
 });
 
-// Обработка всех входящих сообщений
+// ─────────────────────────────────────────────────────────────────────────────
+// Обработка сообщений
+// ─────────────────────────────────────────────────────────────────────────────
+
 bot.on('message', async (ctx) => {
   const userId = ctx.from.id;
 
-  // Если пишет владелец - это ответ на чьё-то сообщение
+  // Владелец отвечает на сообщение
   if (userId === OWNER_ID) {
-    // Обновляем время последней активности владельца
     db.ownerLastActivity = Date.now();
 
     if (ctx.message.reply_to_message) {
-      const originalText = ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption || '';
-      const userIdMatch = originalText.match(/👤 User ID: (\d+)/);
+      const replyToId = ctx.message.reply_to_message.message_id;
 
-      if (userIdMatch) {
-        const targetUserId = parseInt(userIdMatch[1]);
+      // [FIX-1] Сначала ищем в Map (быстро и надёжно)
+      let targetUserId = msgMap.get(replyToId);
 
-        // Сбрасываем автоответ для этого пользователя, раз владелец ответил
+      // Фоллбэк на regex для старых сообщений, которых нет в Map
+      if (!targetUserId) {
+        const originalText =
+          ctx.message.reply_to_message.text ||
+          ctx.message.reply_to_message.caption || '';
+        const match = originalText.match(/👤 User ID: (\d+)/);
+        if (match) targetUserId = parseInt(match[1]);
+      }
+
+      if (targetUserId) {
+        // Сбрасываем автоответ — владелец уже ответил
         if (db.autoReplySent[targetUserId]) {
           delete db.autoReplySent[targetUserId];
           saveDB();
@@ -308,7 +427,6 @@ bot.on('message', async (ctx) => {
         try {
           const replyText = ctx.message.text || ctx.message.caption || '[медиа]';
 
-          // Отправляем ответ с медиа если есть
           if (ctx.message.photo) {
             const photo = ctx.message.photo[ctx.message.photo.length - 1];
             await bot.api.sendPhoto(targetUserId, photo.file_id, {
@@ -320,6 +438,12 @@ bot.on('message', async (ctx) => {
             });
           } else if (ctx.message.document) {
             await bot.api.sendDocument(targetUserId, ctx.message.document.file_id, {
+              caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
+            });
+          } else if (ctx.message.voice) {
+            await bot.api.sendVoice(targetUserId, ctx.message.voice.file_id);
+          } else if (ctx.message.audio) {
+            await bot.api.sendAudio(targetUserId, ctx.message.audio.file_id, {
               caption: `💬 Ответ:\n\n${ctx.message.caption || ''}`
             });
           } else {
@@ -362,15 +486,16 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  // Получаем информацию о пользователе
+  // Информация о пользователе
   const user = ctx.from;
   const messageText = ctx.message.text || ctx.message.caption || '[медиа без текста]';
-  const messageType = ctx.message.photo ? '📸 фото' :
-                      ctx.message.video ? '🎥 видео' :
-                      ctx.message.document ? '📄 документ' :
-                      ctx.message.sticker ? '🎨 стикер' :
-                      ctx.message.voice ? '🎤 голосовое' :
-                      ctx.message.audio ? '🎵 аудио' : '📝 текст';
+  const messageType = ctx.message.photo      ? '📸 фото'      :
+                      ctx.message.video      ? '🎥 видео'     :
+                      ctx.message.document   ? '📄 документ'  :
+                      ctx.message.sticker    ? '🎨 стикер'    :
+                      ctx.message.voice      ? '🎤 голосовое' :
+                      ctx.message.audio      ? '🎵 аудио'     :
+                      ctx.message.video_note ? '⭕ кружочек'  : '📝 текст'; // [NEW-7]
 
   // Сохраняем в БД
   db.messages.push({
@@ -384,52 +509,92 @@ bot.on('message', async (ctx) => {
   });
   saveDB();
 
-  // Форматируем сообщение для владельца
+  const userMsgCount = db.messages.filter(m => m.userId === user.id).length;
+  const isNewUser = userMsgCount === 1; // [NEW-5] первое сообщение когда-либо
+
+  // [FIX-6] Форматируем сообщение для владельца с экранированием
   let forwardMessage =
-    `📩 *Новое сообщение!*\n\n` +
+    `📩 *Новое сообщение!*${isNewUser ? ' 🆕 _Новый пользователь_' : ''}\n\n` +
     `👤 User ID: ${user.id}\n` +
-    `👤 Username: ${user.username ? '@' + user.username : 'Не указан'}\n` +
-    `📝 Имя: ${user.first_name}${user.last_name ? ' ' + user.last_name : ''}\n` +
+    `👤 Username: ${user.username ? '@' + escapeMarkdown(user.username) : 'Не указан'}\n` +
+    `📝 Имя: ${escapeMarkdown(user.first_name)}${user.last_name ? ' ' + escapeMarkdown(user.last_name) : ''}\n` +
     `🤖 Бот: ${user.is_bot ? 'Да' : 'Нет'}\n` +
     `🌐 Язык: ${user.language_code || 'Не указан'}\n` +
     `📊 Тип: ${messageType}\n` +
-    `📬 Всего сообщений от пользователя: ${db.messages.filter(m => m.userId === user.id).length}\n\n`;
+    `📬 Всего сообщений от пользователя: ${userMsgCount}\n\n`;
 
   if (messageText !== '[медиа без текста]') {
-    forwardMessage += `💬 Сообщение:\n${messageText}`;
+    forwardMessage += `💬 Сообщение:\n${escapeMarkdown(messageText)}`;
   }
 
   try {
-    // Пересылаем медиа если есть
+    let sentMsg; // сообщение, отправленное владельцу
+
+    // [NEW-3] Клавиатура прикрепляется прямо к форварду
+    const keyboard = new InlineKeyboard();
+    db.quickReplies.slice(0, 3).forEach(r => {
+      keyboard.text(r.label, `qr_${r.id}_${user.id}`).row();
+    });
+    keyboard.text('🚫 Заблокировать', `block_${user.id}`);
+
     if (ctx.message.photo) {
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
-      await bot.api.sendPhoto(OWNER_ID, photo.file_id, {
+      sentMsg = await bot.api.sendPhoto(OWNER_ID, photo.file_id, {
         caption: forwardMessage,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
       });
     } else if (ctx.message.video) {
-      await bot.api.sendVideo(OWNER_ID, ctx.message.video.file_id, {
+      sentMsg = await bot.api.sendVideo(OWNER_ID, ctx.message.video.file_id, {
         caption: forwardMessage,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
       });
     } else if (ctx.message.document) {
-      await bot.api.sendDocument(OWNER_ID, ctx.message.document.file_id, {
+      sentMsg = await bot.api.sendDocument(OWNER_ID, ctx.message.document.file_id, {
         caption: forwardMessage,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    } else if (ctx.message.audio) {
+      sentMsg = await bot.api.sendAudio(OWNER_ID, ctx.message.audio.file_id, {
+        caption: forwardMessage,
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
       });
     } else if (ctx.message.sticker) {
-      await bot.api.sendMessage(OWNER_ID, forwardMessage, { parse_mode: 'Markdown' });
+      // стикер нельзя с caption — сначала текст с кнопками, потом стикер
+      sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
       await bot.api.sendSticker(OWNER_ID, ctx.message.sticker.file_id);
     } else if (ctx.message.voice) {
-      await bot.api.sendMessage(OWNER_ID, forwardMessage, { parse_mode: 'Markdown' });
-      await bot.api.sendVoice(OWNER_ID, ctx.message.voice.file_id);
-    } else if (ctx.message.audio) {
-      await bot.api.sendAudio(OWNER_ID, ctx.message.audio.file_id, {
-        caption: forwardMessage,
-        parse_mode: 'Markdown'
+      sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
       });
+      await bot.api.sendVoice(OWNER_ID, ctx.message.voice.file_id);
+    } else if (ctx.message.video_note) {
+      sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+      await bot.api.sendVideoNote(OWNER_ID, ctx.message.video_note.file_id);
     } else {
-      await bot.api.sendMessage(OWNER_ID, forwardMessage, { parse_mode: 'Markdown' });
+      sentMsg = await bot.api.sendMessage(OWNER_ID, forwardMessage, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    }
+
+    // [FIX-1] Регистрируем в Map: msgId → userId
+    if (sentMsg?.message_id) {
+      msgMap.set(sentMsg.message_id, user.id);
+      if (msgMap.size > 10000) {
+        const firstKey = msgMap.keys().next().value;
+        msgMap.delete(firstKey);
+      }
     }
 
     // Подтверждаем пользователю
@@ -438,12 +603,11 @@ bot.on('message', async (ctx) => {
       'Вы получите ответ в ближайшее время.'
     );
 
-    // Автоответчик: если владелец не в сети (не активен > 5 минут)
-    const offlineThreshold = 5 * 60 * 1000; // 5 минут
+    // Автоответчик: если владелец не активен >5 минут
+    const offlineThreshold = 5 * 60 * 1000;
     const timeSinceLastActivity = Date.now() - db.ownerLastActivity;
 
     if (timeSinceLastActivity > offlineThreshold && !db.autoReplySent[userId]) {
-      // Отправляем автоответ только один раз этому пользователю
       setTimeout(async () => {
         try {
           await bot.api.sendMessage(userId, '⏰ Сейчас занят, отвечу позже. Спасибо за понимание!');
@@ -453,7 +617,7 @@ bot.on('message', async (ctx) => {
         } catch (error) {
           log('error', 'Failed to send auto-reply', { error: error.message });
         }
-      }, 3000); // Задержка 3 секунды после подтверждения
+      }, 3000);
     }
 
     log('success', 'Message forwarded to owner', { userId, messageType });
@@ -465,7 +629,10 @@ bot.on('message', async (ctx) => {
   }
 });
 
-// Обработка callback кнопок (быстрые ответы)
+// ─────────────────────────────────────────────────────────────────────────────
+// Callback кнопки (быстрые ответы)
+// ─────────────────────────────────────────────────────────────────────────────
+
 bot.on('callback_query:data', async (ctx) => {
   if (ctx.from.id !== OWNER_ID) {
     await ctx.answerCallbackQuery({ text: '⛔ Только владелец может использовать эти кнопки' });
@@ -495,21 +662,51 @@ bot.on('callback_query:data', async (ctx) => {
       await ctx.answerCallbackQuery({ text: '❌ Быстрый ответ не найден' });
     }
   }
+
+  // [NEW-3] Кнопка "Заблокировать" прямо в сообщении
+  if (data.startsWith('block_')) {
+    const targetUserId = parseInt(data.split('_')[1]);
+
+    if (isBlocked(targetUserId)) {
+      await ctx.answerCallbackQuery({ text: '⚠️ Уже заблокирован' });
+      return;
+    }
+
+    db.blocklist.push({
+      userId: targetUserId,
+      reason: 'Заблокирован кнопкой',
+      blockedAt: new Date().toISOString()
+    });
+    saveDB();
+
+    await ctx.answerCallbackQuery({ text: '🚫 Пользователь заблокирован' });
+    await ctx.editMessageText(`🚫 Пользователь ${targetUserId} заблокирован.`);
+    log('warning', 'User blocked via button', { targetUserId });
+  }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Обработка ошибок
+// ─────────────────────────────────────────────────────────────────────────────
+
 bot.catch((err) => {
   log('error', 'Bot error', { error: err.message });
   console.error('Ошибка бота:', err);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Автосохранение БД каждые 5 минут
+// ─────────────────────────────────────────────────────────────────────────────
+
 setInterval(() => {
   saveDB();
   log('info', 'DB auto-saved');
 }, 5 * 60 * 1000);
 
-// Запуск бота
+// ─────────────────────────────────────────────────────────────────────────────
+// Запуск бота (long polling)
+// ─────────────────────────────────────────────────────────────────────────────
+
 log('info', '🤖 Бот запускается...');
 bot.start({
   onStart: (botInfo) => {
@@ -520,15 +717,18 @@ bot.start({
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Graceful shutdown
-process.once('SIGINT', () => {
+// ─────────────────────────────────────────────────────────────────────────────
+
+process.once('SIGINT', async () => {
   log('info', 'SIGINT received, saving database...');
-  saveDB();
+  await saveDB();
   bot.stop();
 });
 
-process.once('SIGTERM', () => {
+process.once('SIGTERM', async () => {
   log('info', 'SIGTERM received, saving database...');
-  saveDB();
+  await saveDB();
   bot.stop();
 });
